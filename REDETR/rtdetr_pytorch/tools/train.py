@@ -11,8 +11,7 @@ from src.core import YAMLConfig
 from src.solver import TASKS
 from pathlib import Path
 import torch
-from src.core.yaml_utils import GLOBAL_CONFIG  #新增
-import src.nn.backbone.lwganet
+
 
 from thop import profile  # 导入 thop 库
 #*********************************************************************#
@@ -48,7 +47,7 @@ def main(args, ) -> None:
     )
     
     # 创建输出目录
-    cfg.output_dir = Path('/gz-data/REDETR/rtdetr_pytorch/tensorboard') / 'rtdetr_r18'
+    cfg.output_dir = Path('/gz-data/REDETR/rtdetr_pytorch/tensorboard')
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
     solver = TASKS[cfg.yaml_cfg['task']](cfg)
