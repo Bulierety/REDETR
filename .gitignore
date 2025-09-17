@@ -38,3 +38,9 @@ venv/
 *.7z
 *.tar
 *.gz
+
+# 训练日志和实时化
+redetr-output/
+tensorboard/
+REDETR/rtdetr_pytorch/redetr-output/
+REDETR/rtdetr_pytorch/tensorboard/
