@@ -9,6 +9,25 @@ import argparse
 import src.misc.dist as dist 
 from src.core import YAMLConfig 
 from src.solver import TASKS
+from pathlib import Path
+import torch
+from src.core.yaml_utils import GLOBAL_CONFIG  #新增
+import src.nn.backbone.lwganet
+
+from thop import profile  # 导入 thop 库
+#*********************************************************************#
+def count_parameters(model):
+    """计算模型的参数数量"""
+    return sum(p.numel() for p in model.parameters())
+
+def print_model_info(model, input_size=(1, 3, 224, 224)):
+    """打印模型的参数数量和 GFLOPs"""
+    input_tensor = torch.randn(input_size)
+    flops, params = profile(model, inputs=(input_tensor, ), verbose=False)
+    gflops = flops / (10**9)
+    print(f"模型参数数量: {params:.2f}")
+    print(f"模型 GFLOPs: {gflops:.2f}")
+#**********************************************************************#
 
 
 def main(args, ) -> None:
@@ -27,6 +46,10 @@ def main(args, ) -> None:
         use_amp=args.amp,
         tuning=args.tuning
     )
+    
+    # 创建输出目录
+    cfg.output_dir = Path('/gz-data/REDETR/rtdetr_pytorch/tensorboard') / 'rtdetr_r18'
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
     solver = TASKS[cfg.yaml_cfg['task']](cfg)
     
