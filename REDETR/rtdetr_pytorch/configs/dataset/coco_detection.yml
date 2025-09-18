@@ -8,12 +8,12 @@ train_dataloader:
   dataset: 
     type: CocoDetection
     img_folder: "/gz-data/REDETR/dataset/instances_UAVtrain"
-    ann_file: "/gz-data/REDETR/dataset/annotations/train_annotations.json"
+    ann_file: "/gz-data/REDETR/dataset/annotations/instances_UAVtrain.json"
     transforms:
       type: Compose
       ops: ~
   shuffle: True
-  batch_size: 16
+  batch_size: 32
   num_workers: 4
   drop_last: True 
 
@@ -23,7 +23,7 @@ val_dataloader:
   dataset: 
     type: CocoDetection
     img_folder: "/gz-data/REDETR/dataset/instances_UAVval"
-    ann_file: "/gz-data/REDETR/dataset/annotations/val_annotations.json"
+    ann_file: "/gz-data/REDETR/dataset/annotations/instances_UAVval.json"
     transforms:
       type: Compose
       ops: ~ 

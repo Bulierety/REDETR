@@ -149,7 +149,7 @@ class PResNet(nn.Module):
         act='relu',
         freeze_at=-1, 
         freeze_norm=True, 
-        pretrained=False):
+        pretrained=None):
         super().__init__()
 
         block_nums = ResNet_cfg[depth]
@@ -193,10 +193,20 @@ class PResNet(nn.Module):
         if freeze_norm:
             self._freeze_norm(self)
 
+        """
         if pretrained:
             state = torch.hub.load_state_dict_from_url(donwload_url[depth])
             self.load_state_dict(state)
             print(f'Load PResNet{depth} state_dict')
+        """
+        if pretrained:
+            if isinstance(pretrained, str):  # 如果传入的是本地路径字符串
+                state = torch.load(pretrained)  # 加载本地模型
+                print(f'Load PResNet{depth} from local path: {pretrained}')
+            else:  # 如果传入的是 True（保留原下载逻辑，可选）
+                state = torch.hub.load_state_dict_from_url(donwload_url[depth])
+                print(f'Load PResNet{depth} from remote URL')
+            self.load_state_dict(state)
             
     def _freeze_parameters(self, m: nn.Module):
         for p in m.parameters():
