@@ -25,37 +25,95 @@ class DetSolver(BaseSolver):
         self.output_dir = Path(cfg.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 早停机制初始化
-        self.early_stop_patience = getattr(cfg, 'early_stop_patience', 10)  # 默认10轮
+        # 早停机制初始化 - 修改为20轮
+        self.early_stop_patience = getattr(cfg, 'early_stop_patience', 20)  # 修改为20轮
         self.early_stop_delta = getattr(cfg, 'early_stop_delta', 0.001)     # 最小提升阈值
         self.best_map = 0.0                                                 # 最佳mAP值
         self.patience_counter = 0                                           # 当前等待轮数
         self.early_stop_triggered = False                                   # 早停标志
+        
+        # 日志格式化相关
+        self.epoch_width = len(str(cfg.epoches))
+        self.log_separator = "=" * 80
+    
+    def _print_header(self, title):
+        """打印标题头"""
+        print(f"\n{self.log_separator}")
+        print(f"{title:^80}")
+        print(f"{self.log_separator}")
+    
+    def _print_section(self, title):
+        """打印章节标题"""
+        print(f"\n{' ' + title + ' ':-^80}")
+    
+    def _print_info(self, key, value, indent=0):
+        """格式化打印信息"""
+        indent_str = " " * indent
+        print(f"{indent_str}{key:<25}: {value}")
+    
+    def _print_epoch_progress(self, epoch, total_epochs, train_stats, test_stats):
+        """打印epoch进度信息"""
+        current_epoch_str = f"Epoch [{epoch:>{self.epoch_width}}/{total_epochs}]"
+        print(f"\n{current_epoch_str:-^80}")
+        
+        # 训练统计信息
+        if train_stats:
+            self._print_section("Training Statistics")
+            for k, v in train_stats.items():
+                if isinstance(v, (int, float)):
+                    self._print_info(k, f"{v:.6f}", indent=2)
+        
+        # 测试统计信息
+        if test_stats:
+            self._print_section("Validation Statistics")
+            for k, v in test_stats.items():
+                if isinstance(v, (list, tuple)) and len(v) > 0:
+                    self._print_info(k, f"{v[0]:.6f}", indent=2)
+                elif isinstance(v, (int, float)):
+                    self._print_info(k, f"{v:.6f}", indent=2)
+    
+    def _print_early_stop_info(self, current_map, improved=False):
+        """打印早停相关信息"""
+        self._print_section("Early Stopping Status")
+        self._print_info("Current mAP", f"{current_map:.4f}", indent=2)
+        self._print_info("Best mAP", f"{self.best_map:.4f}", indent=2)
+        self._print_info("Patience", f"{self.patience_counter}/{self.early_stop_patience}", indent=2)
+        
+        if improved:
+            print(f"{' ':2}🎯 mAP improved! Best model saved.")
+        else:
+            print(f"{' ':2}⏳ No improvement, patience counter increased.")
     
     def fit(self):
-        print("Start training")
-        print(f"Early stopping patience: {self.early_stop_patience} epochs")
-        print(f"Early stopping minimum delta: {self.early_stop_delta}")
+        self._print_header("RT-DETR TRAINING STARTED")
+        self._print_info("Early stopping patience", f"{self.early_stop_patience} epochs")
+        self._print_info("Early stopping delta", f"{self.early_stop_delta}")
+        self._print_info("Total epochs", f"{self.cfg.epoches}")
+        print(self.log_separator)
         
         self.train()
 
         args = self.cfg 
         
         n_parameters = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        print('number of params:', n_parameters)
+        self._print_info("Trainable parameters", f"{n_parameters:,}")
+        print(self.log_separator)
 
         # ------------- TensorBoard 初始化 -------------
         if dist.is_main_process():
             tb_dir = self.output_dir / 'tensorboard'
             tb_dir.mkdir(parents=True, exist_ok=True)
             self.writer = SummaryWriter(log_dir=tb_dir)
-            print(f"TensorBoard logs will be saved to: {tb_dir}")
+            self._print_info("TensorBoard directory", str(tb_dir))
         # ---------------------------------------------
 
         base_ds = get_coco_api_from_dataset(self.val_dataloader.dataset)
         best_stat = {'epoch': -1, }
 
         start_time = time.time()
+        training_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._print_info("Training start time", training_start_time)
+        print(self.log_separator)
         
         # 修改循环条件，加入早停判断
         epoch = self.last_epoch + 1
@@ -63,12 +121,16 @@ class DetSolver(BaseSolver):
             if dist.is_dist_available_and_initialized():
                 self.train_dataloader.sampler.set_epoch(epoch)
             
+            # 训练一个epoch
+            epoch_start_time = time.time()
             train_stats = train_one_epoch(
                 self.model, self.criterion, self.train_dataloader, self.optimizer, self.device, epoch,
                 args.clip_max_norm, print_freq=args.log_step, ema=self.ema, scaler=self.scaler)
+            epoch_train_time = time.time() - epoch_start_time
 
             self.lr_scheduler.step()
             
+            # 保存checkpoint
             if self.output_dir:
                 checkpoint_paths = [self.output_dir / 'checkpoint.pth']
                 if (epoch + 1) % args.checkpoint_step == 0:
@@ -76,38 +138,48 @@ class DetSolver(BaseSolver):
                 for checkpoint_path in checkpoint_paths:
                     dist.save_on_master(self.state_dict(epoch), checkpoint_path)
 
+            # 验证
+            eval_start_time = time.time()
             module = self.ema.module if self.ema else self.model
             test_stats, coco_evaluator = evaluate(
                 module, self.criterion, self.postprocessor, self.val_dataloader, base_ds, self.device, self.output_dir
             )
+            epoch_eval_time = time.time() - eval_start_time
+
+            # 打印epoch进度信息
+            self._print_epoch_progress(epoch, args.epoches, train_stats, test_stats)
+            self._print_info("Epoch time", f"{epoch_train_time:.2f}s (train) + {epoch_eval_time:.2f}s (eval)", indent=2)
 
             # ------------- 早停机制判断 -------------
             current_map = test_stats.get('coco_eval_bbox', [0])[0]  # 获取当前mAP值
             
             if dist.is_main_process():
+                improved = False
                 if current_map > self.best_map + self.early_stop_delta:
                     # 性能提升，重置计数器并更新最佳值
                     self.best_map = current_map
                     self.patience_counter = 0
-                    print(f"✓ mAP improved to {current_map:.4f}, resetting patience counter")
+                    improved = True
                     
                     # 保存最佳模型
                     best_model_path = self.output_dir / 'best_model.pth'
                     dist.save_on_master(self.state_dict(epoch), best_model_path)
-                    print(f"✓ Best model saved to {best_model_path}")
+                    self._print_info("Best model saved", str(best_model_path), indent=2)
                     
                 else:
                     # 性能没有显著提升，增加计数器
                     self.patience_counter += 1
-                    print(f"✗ mAP did not improve ({current_map:.4f} vs best {self.best_map:.4f}), "
-                          f"patience: {self.patience_counter}/{self.early_stop_patience}")
                     
                     # 检查是否触发早停
                     if self.patience_counter >= self.early_stop_patience:
                         self.early_stop_triggered = True
-                        print(f"⏹️ Early stopping triggered at epoch {epoch}! "
-                              f"No improvement for {self.early_stop_patience} consecutive epochs.")
-                        print(f"Best mAP: {self.best_map:.4f} at epoch {best_stat['epoch']}")
+                        self._print_section("EARLY STOPPING TRIGGERED")
+                        self._print_info("Stopped at epoch", epoch, indent=2)
+                        self._print_info("Best mAP", f"{self.best_map:.4f}", indent=2)
+                        self._print_info("Best epoch", best_stat['epoch'], indent=2)
+                
+                # 打印早停信息
+                self._print_early_stop_info(current_map, improved)
             # -----------------------------------------
 
             # 更新最佳统计
@@ -118,13 +190,19 @@ class DetSolver(BaseSolver):
                 else:
                     best_stat['epoch'] = epoch
                     best_stat[k] = test_stats[k][0]
-            print('best_stat: ', best_stat)
+            
+            self._print_section("Best Statistics So Far")
+            for k, v in best_stat.items():
+                if k != 'epoch':
+                    self._print_info(k, f"{v:.6f}", indent=2)
+                else:
+                    self._print_info(k, v, indent=2)
 
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                         **{f'test_{k}': v for k, v in test_stats.items()},
                         'epoch': epoch,
                         'n_parameters': n_parameters,
-                        'early_stop_patience': self.patience_counter,  # 记录早停状态
+                        'early_stop_patience': self.patience_counter,
                         'best_map': self.best_map}
             
             # ------------- TensorBoard 记录 -------------
@@ -154,7 +232,6 @@ class DetSolver(BaseSolver):
                             self.writer.add_scalar('mAP/AP_small', stats[3], epoch)
                             self.writer.add_scalar('mAP/AP_medium', stats[4], epoch)
                             self.writer.add_scalar('mAP/AP_large', stats[5], epoch)
-                            print(f"Epoch {epoch}: mAP@[0.5:0.95] = {stats[0]:.4f}, mAP@0.5 = {stats[1]:.4f}")
                     except Exception as e:
                         print(f"Error recording mAP metrics: {e}")
             # --------------------------------------------
@@ -174,6 +251,7 @@ class DetSolver(BaseSolver):
                                     self.output_dir / "eval" / name)
             
             epoch += 1  # 手动增加epoch计数
+            print(self.log_separator)
         
         # ------------- 关闭 TensorBoard -------------
         if dist.is_main_process():
@@ -182,24 +260,41 @@ class DetSolver(BaseSolver):
                     
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print('Training time {}'.format(total_time_str))
         
-        # 训练结束提示
+        self._print_header("TRAINING COMPLETED")
+        self._print_info("Total training time", total_time_str)
+        self._print_info("Best mAP achieved", f"{self.best_map:.4f}")
+        self._print_info("Best epoch", best_stat['epoch'])
+        
         if self.early_stop_triggered:
-            print(f"🏁 Training stopped early at epoch {epoch-1}")
+            self._print_info("Stopped reason", "Early stopping")
         else:
-            print(f"🏁 Training completed all {args.epoches} epochs")
-        print(f"🎯 Best mAP achieved: {self.best_map:.4f}")
+            self._print_info("Stopped reason", "Completed all epochs")
+        
+        print(self.log_separator)
 
     def val(self):
+        self._print_header("VALIDATION STARTED")
         self.eval()
         base_ds = get_coco_api_from_dataset(self.val_dataloader.dataset)
         
+        val_start_time = time.time()
         module = self.ema.module if self.ema else self.model
         test_stats, coco_evaluator = evaluate(module, self.criterion, self.postprocessor,
                 self.val_dataloader, base_ds, self.device, self.output_dir)
+        val_time = time.time() - val_start_time
                 
         if self.output_dir:
             dist.save_on_master(coco_evaluator.coco_eval["bbox"].eval, self.output_dir / "eval.pth")
+        
+        self._print_section("Validation Results")
+        for k, v in test_stats.items():
+            if isinstance(v, (list, tuple)) and len(v) > 0:
+                self._print_info(k, f"{v[0]:.6f}")
+            elif isinstance(v, (int, float)):
+                self._print_info(k, f"{v:.6f}")
+        
+        self._print_info("Validation time", f"{val_time:.2f}s")
+        print(self.log_separator)
         
         return
